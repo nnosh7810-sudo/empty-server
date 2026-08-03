@@ -1,49 +1,52 @@
 from flask import Flask, request, send_file
-import yt_dlp
+import aiohttp
 import os
 import uuid
 
 app = Flask(__name__)
 
+@app.route("/")
+def home():
+    return "✔ Server is running"
+
 @app.route("/audio")
-def audio():
+async def audio():
     video_id = request.args.get("id")
     if not video_id:
         return "Missing id", 400
 
-    url = f"https://youtube.com/watch?v={video_id}"
-    filename = f"{uuid.uuid4()}.mp3"
-    output_path = f"/tmp/{filename}"
-
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
-        "outtmpl": "/tmp/%(id)s.%(ext)s",
-        "quiet": True,
-        "no_warnings": True,
-    }
+    api = f"https://pipedapi.kavin.rocks/streams/{video_id}"
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api) as resp:
+                if resp.status != 200:
+                    return "Failed to fetch metadata", 500
 
-        real_file = None
-        for f in os.listdir("/tmp"):
-            if f.endswith(".mp3"):
-                real_file = f"/tmp/{f}"
-                break
+                data = await resp.json()
 
-        if not real_file:
-            return "Failed to extract audio", 500
+        audio_streams = data.get("audioStreams", [])
+        if not audio_streams:
+            return "No audio streams found", 500
 
-        return send_file(real_file, mimetype="audio/mpeg")
+        best_audio = max(audio_streams, key=lambda x: x.get("bitrate", 0))
+        audio_url = best_audio.get("url")
+
+        if not audio_url:
+            return "Audio URL missing", 500
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(audio_url) as resp:
+                if resp.status != 200:
+                    return "Failed to download audio", 500
+
+                audio_data = await resp.read()
+
+        filename = f"/tmp/{uuid.uuid4()}.webm"
+        with open(filename, "wb") as f:
+            f.write(audio_data)
+
+        return send_file(filename, mimetype="audio/webm")
 
     except Exception as e:
         return str(e), 500
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
